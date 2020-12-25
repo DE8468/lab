@@ -9,19 +9,39 @@
 #include <sstream>
 #include <string>
 #include <vector>
+#pragma comment (lib, "ws2_32.lib")
 
 #define PORT 10086 //listen port
 #define SIZE 114514 //buffer size
 
+const char* ERROR1URL = "https://bing.com";
+
 using namespace std;
 
 char buffer[SIZE];
+
+const char* BANNED[] = { "baidu.com" };
 
 //print error
 void error(char* msg)
 {
     printf("\nFatal Error: %s\n", msg);
     exit(1);
+}
+
+int strfind(string data, string needle)
+{
+    if (data.length() < needle.length()) return 0;
+    for (size_t i = 0; i < data.length() - needle.length(); i++)
+    {
+        size_t k;
+        for (k = 0; k < needle.length(); k++)
+        {
+            if ((data[i + k] | 32) != (needle[k] | 32)) break;
+        }
+        if (k == needle.length()) return 1;
+    }
+    return 0;
 }
 
 //tolower
@@ -332,6 +352,62 @@ public:
         r += method + " " + url.render() + " " + http;
         return r;
     }
+};
+
+class httpresponse : public httpmessage
+{
+
+public:
+    virtual ~httpresponse() {}
+    string code;
+    string reason;
+
+    httpresponse() :httpmessage()
+    {
+        type = 2;
+        code = "200";
+        reason = "OK";
+    }
+
+    // parse the first line. ie: "HTTP/1.1 200 OK"
+    void readfirst(string line)
+    {
+        size_t i = line.find(" ");
+        if (i == string::npos)
+        {
+            printf("error: no http\n");
+            status = -1;
+            return;
+        }
+        http = line.substr(0, i);
+        line.erase(0, i + 1);
+
+        i = line.find(" ");
+        if (i == string::npos)
+        {
+            printf("error: no response code\n");
+            status = -1;
+            return;
+        }
+        code = line.substr(0, i);
+        reason = line.substr(i + 1);
+
+        if (http != "HTTP/1.0" && http != "HTTP/1.1")
+        {
+            printf("error: invalid http: %s\n", http.c_str());
+            status = -1;
+            return;
+        }
+
+        status = 1;
+    }
+
+    string renderfirst()
+    {
+        string r;
+        r += http + " " + code + " " + reason;
+        return r;
+    }
 
 };
 
@@ -352,18 +428,18 @@ public:
 
     ~proxyhandler()
     {
-        close(sock);
+        closesocket(sock);
     }
 
     // keep processing requests until the client disconnects
     void main()
     {
         int requests = 0;
-        if (debug) printf("Processing connection from %s:%d\n", inet_ntoa(addr.sin_addr), ntohs(addr.sin_port));
+        printf("Processing connection from %s:%d\n", inet_ntoa(addr.sin_addr), ntohs(addr.sin_port));
         //process();
         while (process() != -1) requests++;
-        if (debug) printf("Finished connection from %s:%d\n", inet_ntoa(addr.sin_addr), ntohs(addr.sin_port));
-        if (debug) printf("Served %d requests to the client\n", requests);
+        printf("Finished connection from %s:%d\n", inet_ntoa(addr.sin_addr), ntohs(addr.sin_port));
+        printf("Served %d requests to the client\n", requests);
     }
 
     // read a single request from the client, and serve the appropriate response
@@ -376,9 +452,9 @@ public:
         {  // client disconnected
             return -1;
         }
-        if (debug >= 2) printf("CLIENT->PROXY:\n\n%s\n\n", req.render().c_str());
+        printf("CLIENT->PROXY:\n\n%s\n\n", req.render().c_str());
 
-        if (debug >= 1) printf("  CLIENT: %s\n", req.url.render().c_str());
+        printf("  CLIENT: %s\n", req.url.render().c_str());
         int r = load(req, res);
 
         res.header["Proxy-Connection"] = "close";
@@ -390,7 +466,7 @@ public:
             res.header["Connection"] = "keep-alive";
         }
 
-        if (debug >= 2) printf("PROXY->CLIENT:\n\n%s\n\n", res.render().c_str());
+        printf("PROXY->CLIENT:\n\n%s\n\n", res.render().c_str());
         send(sock, res);
 
         return r;
@@ -413,12 +489,12 @@ public:
 
         if (banned(req.url.render())) // bad URL
         {
-            res = response(302, "Page Moved", BADURL);
+            res = response(302, "Page Moved", "");
             res.header["Location"] = ERROR1URL;
             return 0;
         }
 
-        if (req.url.render() == ERROR1URL || req.url.render() == ERROR2URL)
+        if (req.url.render() == ERROR1URL)
         {
             if (req.header.count("If-Modified-Since"))
             {
@@ -451,7 +527,7 @@ public:
         req.header["Connection"] = "close"; // HTTP/1.1 doesn't quite work on the client side
         req.url.type = 2;
 
-        if (debug >= 2) printf("PROXY->SERV:\n\n%s\n\n", req.render().c_str());
+        printf("PROXY->SERV:\n\n%s\n\n", req.render().c_str());
         if (send(serv, req) == -1)
         {
             res = response(502, "Server Error", "Error sending request to remote server");
@@ -464,23 +540,17 @@ public:
             return 0;
         }
 
-        if (debug >= 2) printf("SERV->PROXY (good) (%d bytes):\n\n%s\n\n", res.data.length(), res.render().c_str());
-        close(serv);
+        printf("SERV->PROXY (good) (%d bytes):\n\n%s\n\n", res.data.length(), res.render().c_str());
+        closesocket(serv);
 
         req.header = temp;
-
-        if (banned(res.data)) // bad content
-        {
-            res = response(302, "Page Moved", BADCONTENT);
-            res.header["Location"] = ERROR2URL;
-            return 0;
-        }
 
         if (!res.header.count("Content-Length")) // the server might not have sent a C-L header, but we need one so the client can read >1 responses.
             res.header["Content-Length"] = tostring(res.data.length());
 
         else if (atoi(res.header["Content-Length"].c_str()) != (int)res.data.length())
-            error("content-length mismatch"); // this should never happen, httpmessage checks it
+            printf("content-length mismatch");
+            exit(1);
 
 
         return 0;
@@ -506,26 +576,28 @@ public:
         while (msg.status != 3 && msg.status != -1)
         {   // peek - we might not want all of the bytes here, as some may be for a future pipelined message, and not this message.
             int r = ::recv(sock, buffer, SIZE, MSG_PEEK);
-            if (debug >= 3) printf("got %d bytes\n", r);
+            printf("got %d bytes\n", r);
             if (r == -1)
             {
-                error("recv");
+                printf("recv");
+                exit(1);
                 return -1;
             }
 
             if (r == 0)
             { // peer closed the connection
                 msg.close();
-                if (debug >= 3) printf("peer closed connection. status=%d\n", msg.status);
+                printf("peer closed connection. status=%d\n", msg.status);
                 if (msg.status == -1)   return -1;
                 else                    return bytes;
             }
 
             int rr = msg.read(buffer, r);
-            if (debug >= 3) printf("httpmessage (status=%d) wanted %d bytes\n", msg.status, rr);
+            printf("httpmessage (status=%d) wanted %d bytes\n", msg.status, rr);
             if (rr != ::recv(sock, buffer, rr, 0))
             {   // clear the buffer of bytes we acctually wanted
-                error("error reading socket");
+                printf("error reading socket");
+                exit(1);
             }
             bytes += rr;
         }
@@ -552,7 +624,7 @@ public:
         {
             if (strfind(data, BANNED[i]))
             {
-                if (debug) printf("FOUND: %s\n", BANNED[i]);
+                printf("FOUND: %s\n", BANNED[i]);
                 return 1;
             }
         }
@@ -564,6 +636,54 @@ public:
 
 int main()
 {
+    WSADATA wsaData;
+    WSAStartup(MAKEWORD(2, 2), &wsaData);
+    int port = PORT;
+    printf("HTTP Proxy listening on port %d\n", port);
+    int                 listener;
+    struct sockaddr_in  addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(port);
+    addr.sin_addr.s_addr = INADDR_LOOPBACK;
+    listener = socket(AF_INET, SOCK_STREAM, 0);
+    if (listener == -1) {
+        printf("create socket");
+        exit(1);
+    }
+    if (bind(listener, (struct sockaddr*)&addr, sizeof addr) == -1) {
+        printf("bind");
+        exit(1);
+    }
+    if (listen(listener, 10) == -1) {
+        printf("listen");
+        exit(1);
+    }
+    while (1)
+    {
+        int size;
+        struct sockaddr_in newaddr;
+
+        int newsock = accept(listener, (struct sockaddr*)&newaddr, &size);
+        if (newsock == -1)
+            printf("accept");
+            exit(1);
+
+        printf("connection from %s\n", inet_ntoa(newaddr.sin_addr));
+        STARTUPINFO si;
+        PROCESS_INFORMATION pi;
+        ZeroMemory(&si, sizeof(si));
+        si.cb = sizeof(si);
+        ZeroMemory(&pi, sizeof(pi));
+        if (!CreateProcess(NULL, NULL, NULL, NULL, false, 0, NULL, NULL, &si, &pi))
+        {
+            closesocket(listener);
+            proxyhandler px(newsock, newaddr);
+            px.main();
+            return 0;
+        }
+        closesocket(newsock);
+    }
     std::cout << "Hello World!\n";
 }
 
